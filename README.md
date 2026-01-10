@@ -14,60 +14,99 @@ ZK_InsuranceX brings unemployment benefits on-chain with privacy-preserving desi
 | Employee address | **Private** | Only employer + employee know the relationship |
 | Salary | **Private** | Sensitive personal information |
 | Start/end dates | **Private** | Employment history is confidential |
+| Termination details | **Private** | Only parties involved see dispute status |
 | Individual premiums | **Private** | Per-employee contributions not disclosed |
 | Employer total premiums | **Public** | Macro-level transparency (like annual reports) |
+| Employee count per employer | **Public** | Macro-level transparency |
 | Total pool | **Public** | System solvency is transparent |
 
 ## Roles
 
-- **Admin (UWV)** — The authority that registers employers. Cannot see private employee data.
-- **Employers** — Register employees, deposit premiums, confirm terminations.
-- **Employees** — Hold private records of their employment, submit claims, withdraw benefits.
+- **Admin (UWV)** — The authority that registers employers and resolves termination disputes. Cannot see private employee data.
+- **Employers** — Register employees, deposit premiums, initiate terminations.
+- **Employees** — Hold private records of their employment, submit claims, withdraw benefits, can dispute terminations.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        PUBLIC STATE                             │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
-│  │   employers     │  │ employer_totals │  │   pool_total    │  │
-│  │ addr => bool    │  │ addr => u64     │  │     u64         │  │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           PUBLIC STATE (Mappings)                        │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐  │
+│  │   employers     │  │ employee_count  │  │     employments         │  │
+│  │ addr => bool    │  │ addr => u64     │  │ hash(emp,ee) => bool    │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────────────────┘  │
+│                                                                          │
+│  ┌─────────────────┐  ┌─────────────────┐                               │
+│  │ employer_totals │  │   pool_total    │  (future)                     │
+│  │ addr => u64     │  │     u64         │                               │
+│  └─────────────────┘  └─────────────────┘                               │
+└─────────────────────────────────────────────────────────────────────────┘
 
-┌─────────────────────────────────────────────────────────────────┐
-│                       PRIVATE STATE                             │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                   Employee Record                        │    │
-│  │  owner: address (employee)                               │    │
-│  │  employer: address                                       │    │
-│  │  salary: u64                                             │    │
-│  │  start_date: u64                                         │    │
-│  │  end_date: u64                                           │    │
-│  │  premiums_paid: u64                                      │    │
-│  │  is_active: bool                                         │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         PRIVATE STATE (Records)                          │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                      Employment Record                           │    │
+│  │  owner: address           // employer OR employee holds copy     │    │
+│  │  employer: address                                               │    │
+│  │  employee: address                                               │    │
+│  │  salary: u64              // monthly salary in USDC micro-units  │    │
+│  │  start_block: u64                                                │    │
+│  │  end_block: u64           // 0 if active                         │    │
+│  │  is_active: bool                                                 │    │
+│  │  termination_type: u8     // 0=active, 1=mutual, 2=fired, 3=UWV  │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                    PremiumReceipt Record (future)                │    │
+│  │  owner: address           // employer holds                      │    │
+│  │  employer: address                                               │    │
+│  │  total_amount: u64                                               │    │
+│  │  employee_count: u64                                             │    │
+│  │  block_height: u64                                               │    │
+│  │  merkle_root: field       // commitment to individual breakdown  │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Flow
+## Termination Flow
 
-1. **Admin registers employer** → `register_employer(employer_address)`
-2. **Employer registers employee** → Employee receives private record
-3. **Employer deposits premium** → Private record updated, public totals increase
-4. **Employer terminates employment** → Private record updated (end_date set)
-5. **Employee submits claim** → Claim created with pending status
-6. **Claim approved** → Via employer confirmation or auto-approval
-7. **Employee withdraws benefits** → Monthly withdrawals from pool
+**Mutual consent:** Both employer and employee present records → both updated → clean termination
+
+**Employer fires:** Employer updates their record → employee can dispute to UWV → UWV resolves
+
+```
+termination_type values:
+  0 = active (employed)
+  1 = mutual (both agreed)
+  2 = employer-initiated (may be disputed)
+  3 = UWV-resolved
+```
+
+## Premium Payments (Batch Model)
+
+To scale for large employers (10,000+ employees), premiums use a batch receipt model:
+
+- **On-chain:** One `PremiumReceipt` per employer per month with merkle root
+- **Off-chain:** Employer stores individual employee breakdown
+- **Audit:** Merkle proofs verify individual payments when needed
+
+This keeps individual premium data private while maintaining auditability.
+
+## Benefit Calculation
+
+Following Dutch WW system:
+- **Benefit amount:** 70% of last monthly salary
+- **No link to premiums paid:** Benefits are from collective pool, not individual savings
 
 ## Development Status
 
 - [x] Employer registration (admin-controlled)
-- [ ] Employee registration (private records)
-- [ ] Premium deposits (USDC integration)
-- [ ] Employment termination
+- [x] Employee registration (private records, dual copies)
+- [ ] Premium deposits (batch receipts, USDC integration)
+- [ ] Employment termination (mutual + disputed paths)
 - [ ] Claim submission
-- [ ] Claim approval
+- [ ] Claim approval / UWV dispute resolution
 - [ ] Benefit withdrawals
 
 ## Getting Started
@@ -86,7 +125,11 @@ leo build
 ### Test locally
 
 ```bash
+# Register employer (admin only)
 leo run register_employer <employer_address>
+
+# Register employee (employer only)
+leo run register_employee <employee_address> <salary_u64> <start_block_u64>
 ```
 
 ### Deploy to devnet
