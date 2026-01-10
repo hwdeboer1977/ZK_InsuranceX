@@ -36,10 +36,11 @@ ZK_InsuranceX brings unemployment benefits on-chain with privacy-preserving desi
 │  │ addr => bool    │  │ addr => u64     │  │ hash(emp,ee) => bool    │  │
 │  └─────────────────┘  └─────────────────┘  └─────────────────────────┘  │
 │                                                                          │
-│  ┌─────────────────┐  ┌─────────────────┐                               │
-│  │ employer_totals │  │   pool_total    │  (future)                     │
-│  │ addr => u64     │  │     u64         │                               │
-│  └─────────────────┘  └─────────────────┘                               │
+│  ┌─────────────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
+│  │  pending_terminations   │  │ employer_totals │  │   pool_total    │  │
+│  │  hash(emp,ee) => u64    │  │ addr => u64     │  │     u64         │  │
+│  │  (deadline block)       │  │ (future)        │  │ (future)        │  │
+│  └─────────────────────────┘  └─────────────────┘  └─────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -54,7 +55,7 @@ ZK_InsuranceX brings unemployment benefits on-chain with privacy-preserving desi
 │  │  start_block: u64                                                │    │
 │  │  end_block: u64           // 0 if active                         │    │
 │  │  is_active: bool                                                 │    │
-│  │  termination_type: u8     // 0=active, 1=mutual, 2=fired, 3=UWV  │    │
+│  │  termination_type: u8     // 0=active, 1=mutual, 2=fired, 3=disputed, 4=UWV │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
@@ -71,17 +72,61 @@ ZK_InsuranceX brings unemployment benefits on-chain with privacy-preserving desi
 
 ## Termination Flow
 
-**Mutual consent:** Both employer and employee present records → both updated → clean termination
-
-**Employer fires:** Employer updates their record → employee can dispute to UWV → UWV resolves
-
 ```
-termination_type values:
-  0 = active (employed)
-  1 = mutual (both agreed)
-  2 = employer-initiated (may be disputed)
-  3 = UWV-resolved
+┌──────────────────┐
+│ Active Employment │
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│ 1. Employer calls terminate_initiate │
+│    - Employer record updated     │
+│    - Deadline set in mapping     │
+└────────┬─────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│ Employee has X blocks to respond │
+│ (TERMINATION_RESPONSE_PERIOD)    │
+└────────┬─────────────────────────┘
+         │
+    ┌────┴────┬────────────┐
+    ▼         ▼            ▼
+┌────────┐ ┌────────┐ ┌──────────────┐
+│Confirm │ │Dispute │ │ No response  │
+│        │ │        │ │              │
+└───┬────┘ └───┬────┘ └──────┬───────┘
+    │          │             │
+    ▼          ▼             ▼
+┌────────┐ ┌────────────┐ ┌──────────────────┐
+│ Mutual │ │ UWV Review │ │ Anyone calls     │
+│ type=1 │ │ type=3     │ │ terminate_finalize│
+└───┬────┘ └─────┬──────┘ └────────┬─────────┘
+    │            │                 │
+    │      ┌─────┴─────┐           │
+    │      ▼           ▼           │
+    │ ┌────────┐ ┌──────────┐      │
+    │ │Approved│ │ Reversed │      │
+    │ │ type=4 │ │ (active) │      │
+    │ └───┬────┘ └──────────┘      │
+    │     │                        │
+    ▼     ▼                        ▼
+┌─────────────────────────────────────┐
+│ Employment terminated               │
+│ - employments[hash] = false         │
+│ - employee_count decremented        │
+│ - Can be re-hired in future         │
+└─────────────────────────────────────┘
 ```
+
+**Termination types:**
+| Value | Status | Description |
+|-------|--------|-------------|
+| 0 | Active | Currently employed |
+| 1 | Mutual | Both parties agreed to terminate |
+| 2 | Employer-initiated | Pending employee response |
+| 3 | Disputed | Employee disputed, pending UWV review |
+| 4 | UWV-resolved | UWV made final decision |
 
 ## Premium Payments (Batch Model)
 
@@ -103,10 +148,15 @@ Following Dutch WW system:
 
 - [x] Employer registration (admin-controlled)
 - [x] Employee registration (private records, dual copies)
+- [x] Employment termination
+  - [x] `terminate_initiate` - Employer initiates
+  - [x] `terminate_confirm` - Employee confirms (mutual)
+  - [x] `terminate_dispute` - Employee disputes to UWV
+  - [x] `terminate_finalize` - Auto-finalize after deadline
+  - [x] `terminate_uwv_resolve` - UWV resolves dispute
 - [ ] Premium deposits (batch receipts, USDC integration)
-- [ ] Employment termination (mutual + disputed paths)
 - [ ] Claim submission
-- [ ] Claim approval / UWV dispute resolution
+- [ ] Claim approval
 - [ ] Benefit withdrawals
 
 ## Getting Started
@@ -130,6 +180,21 @@ leo run register_employer <employer_address>
 
 # Register employee (employer only)
 leo run register_employee <employee_address> <salary_u64> <start_block_u64>
+
+# Terminate employment (employer initiates)
+leo run terminate_initiate <employment_record> <current_block_u64>
+
+# Employee confirms termination
+leo run terminate_confirm <employment_record> <end_block_u64>
+
+# Employee disputes termination
+leo run terminate_dispute <employment_record> <current_block_u64>
+
+# Finalize after deadline (anyone can call)
+leo run terminate_finalize <employer_address> <employee_address> <current_block_u64>
+
+# UWV resolves dispute (admin only)
+leo run terminate_uwv_resolve <employer_address> <employee_address> <approved_bool>
 ```
 
 ### Deploy to devnet
@@ -137,6 +202,19 @@ leo run register_employee <employee_address> <salary_u64> <start_block_u64>
 ```bash
 leo deploy --network testnet --broadcast
 ```
+
+### Execute on devnet
+
+```bash
+leo execute register_employer <employer_address> --network testnet --broadcast
+```
+
+## Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `TERMINATION_RESPONSE_PERIOD` | 86400 | ~1 day in blocks (testing) |
+| `TERMINATION_RESPONSE_PERIOD` | 2592000 | ~30 days in blocks (production) |
 
 ## Token
 

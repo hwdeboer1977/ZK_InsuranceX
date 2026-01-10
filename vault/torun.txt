@@ -1,0 +1,58 @@
+// DEVNET alternative 1
+leo build
+leo devnet --snarkos $(which snarkos) --snarkos-features test_network --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11 --clear-storage
+leo deploy --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+leo execute register_employer aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+CHECK: curl http://localhost:3030/testnet/program/zk_insurancex.aleo/mapping/employers/aleo1d9es6d8kuzg65dlfdpx9zxchcsarh8k0hwxfx5eg6k4w7ew6gs8sv5aza0
+leo execute register_employee aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px 5000000000u64 1000u64 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+
+// Use output record  employer from registration employee
+// NOTE: nonce will change!
+leo execute terminate_initiate "{
+  owner: aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px.private,
+  employer: aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px.private,
+  employee: aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px.private,
+  salary: 5000000000u64.private,
+  start_block: 1000u64.private,
+  end_block: 0u64.private,
+  is_active: true.private,
+  termination_type: 0u8.private,
+  _nonce: 8325394838570353276709220070166749314250940030833169809062078572722169821655group.public,
+  _version: 1u8.public
+}
+" 2000u64 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+
+// Use output record  employee from registration employee
+// NOTE: nonce will change!
+leo execute terminate_confirm "{
+  owner: aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px.private,
+  employer: aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px.private,
+  employee: aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px.private,
+  salary: 5000000000u64.private,
+  start_block: 1000u64.private,
+  end_block: 0u64.private,
+  is_active: true.private,
+  termination_type: 0u8.private,
+  _nonce: 5751432570942040366343992980683298291917989121557126880456731672764306149495group.public,
+  _version: 1u8.public
+}" 2050u64 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+// Use output record  employee from registration employee
+// NOTE: nonce will change!
+leo execute terminate_dispute "{
+  owner: aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px.private,
+  employer: aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px.private,
+  employee: aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px.private,
+  salary: 5000000000u64.private,
+  start_block: 1000u64.private,
+  end_block: 0u64.private,
+  is_active: true.private,
+  termination_type: 0u8.private,
+  _nonce: 808132945368978199231124204513703596654434678927491906513778452285255429960group.public,
+  _version: 1u8.public
+}" 2050u64 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+
+leo execute terminate_uwv_resolve aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px true --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
