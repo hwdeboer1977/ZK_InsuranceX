@@ -3,6 +3,7 @@
 // Phase 2: Employee Registration
 // Phase 3: Employment Termination
 // Phase 4: Premium Deposits
+// Phase 5: Claims & Benefits
 
 // TESTNET
 // 1. leo build
@@ -20,8 +21,14 @@
 //
 // PREMIUM DEPOSIT FLOW:
 // 1. Mint USDC: leo execute mock_usdc.aleo/mint_public <employer> 1000000000u128 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
-// 2. Approve: leo execute mock_usdc.aleo/approve zk_insurancex.aleo <program address> 500000000u128 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+// 2. Approve: leo execute mock_usdc.aleo/approve <program_address> 500000000u128 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 // 3. Deposit: leo execute deposit_premium 540000000u128 1u64 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+//
+// CLAIM & BENEFIT FLOW:
+// 1. After termination (type 1, 2, or 4), employee submits claim:
+//    leo execute submit_claim <terminated_employment_record> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+// 2. Employee withdraws monthly benefit:
+//    leo execute withdraw_benefit <claim_record> <current_block> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 
 import mock_usdc.aleo;
 
@@ -31,6 +38,10 @@ program zk_insurancex.aleo {
     @noupgrade
     async constructor() {}
 
+    // ============================================
+    // CONSTANTS
+    // ============================================
+
     // The admin address (UWV authority)
     // const ADMIN: address = aleo1d9es6d8kuzg65dlfdpx9zxchcsarh8k0hwxfx5eg6k4w7ew6gs8sv5aza0; // Testnet
     const ADMIN: address = aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px; // Devnet
@@ -39,16 +50,28 @@ program zk_insurancex.aleo {
     // In production, this could be a multi-sig or the program itself
     const POOL: address = aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px; // Same as admin for testing
 
-    // Termination response period in blocks (~10 blocks for testing)
-    const TERMINATION_RESPONSE_PERIOD: u64 = 10u64;
-    // const TERMINATION_RESPONSE_PERIOD: u64 = 86400u64;    // ~1 day
-    // const TERMINATION_RESPONSE_PERIOD: u64 = 2592000u64;  // ~30 days (production)
+    // Termination response period in blocks
+    const TERMINATION_RESPONSE_PERIOD: u64 = 10u64;           // ~10 blocks (testing)
+    // const TERMINATION_RESPONSE_PERIOD: u64 = 2592000u64;   // ~30 days (production)
     
+    // Benefit calculation constants
+    // For testing, use smaller values. For production, use real block times.
+    const BLOCKS_PER_MONTH: u64 = 100u64;                     // Testing: 100 blocks = 1 month
+    // const BLOCKS_PER_MONTH: u64 = 2592000u64;              // Production: ~30 days
+    const BLOCKS_PER_YEAR: u64 = 1200u64;                     // Testing: 1200 blocks = 1 year
+    // const BLOCKS_PER_YEAR: u64 = 31536000u64;              // Production: ~365 days
+    const MIN_WORK_DURATION: u64 = 600u64;                    // Testing: 600 blocks = 26 weeks
+    // const MIN_WORK_DURATION: u64 = 15724800u64;            // Production: 26 weeks
+    
+    const MIN_BENEFIT_MONTHS: u64 = 3u64;                     // Minimum 3 months benefit
+    const MAX_BENEFIT_MONTHS: u64 = 24u64;                    // Maximum 24 months benefit
+    const BENEFIT_PERCENTAGE: u64 = 70u64;                    // 70% of salary
+
     // Termination types
     // 0 = active (employed)
     // 1 = mutual (both agreed)
-    // 2 = employer-initiated (pending employee response)
-    // 3 = disputed (pending UWV review)
+    // 2 = employer-initiated (finalized after deadline)
+    // 3 = disputed (pending UWV review) - NOT eligible for benefits
     // 4 = UWV-resolved
 
     // ============================================
@@ -56,7 +79,6 @@ program zk_insurancex.aleo {
     // ============================================
 
     // Simple struct for hashing employer-employee pairs
-    // Used to create unique keys for mappings
     struct EmploymentKey {
         employer: address,
         employee: address,
@@ -66,6 +88,13 @@ program zk_insurancex.aleo {
     struct PremiumKey {
         employer: address,
         period: u64,
+    }
+
+    // Struct for hashing claim keys
+    struct ClaimKey {
+        employer: address,
+        employee: address,
+        end_block: u64,
     }
 
     // ============================================
@@ -81,7 +110,7 @@ program zk_insurancex.aleo {
         start_block: u64,         // Block height when registered
         end_block: u64,           // 0 if active, block height if terminated
         is_active: bool,          // Currently employed?
-        termination_type: u8,     // 0 = active, 1 = mutual, 2 = employer-initiated, 3 = UWV-resolved
+        termination_type: u8,     // 0 = active, 1 = mutual, 2 = employer-initiated, 3 = disputed, 4 = UWV-resolved
     }
 
     // Premium receipt - proof of payment for employer
@@ -92,58 +121,60 @@ program zk_insurancex.aleo {
         period: u64,              // Period identifier (1, 2, 3...)
     }
 
+    // Claim record - held by employee after submitting claim
+    record Claim {
+        owner: address,           // Employee
+        employee: address,        // Same as owner
+        employer: address,        // Former employer (for reference)
+        benefit_amount: u128,     // 70% of monthly salary (USDC, 6 decimals)
+        total_months: u64,        // Total months of benefit eligibility
+        months_claimed: u64,      // Months already withdrawn
+        last_withdraw_block: u64, // Block of last withdrawal (for monthly tracking)
+        end_block: u64,           // Employment end block (for claim uniqueness)
+    }
+
     // ============================================
     // MAPPINGS
     // ============================================
     
-    // MAPPING is PUBLIC - visible to everyone on-chain
-    // Aleo model: private computation in transitions, public state changes in finalize.
-    // Tracks registered employers: employer_address => is_registered
+    // Employer registration
     mapping employers: address => bool;
     
-    // Tracks active employments: hash(employer, employee) => is_active
-    mapping employments: field => bool;  // true = active, false = not active (can re-hire)
-    
-    // Tracks employee count per employer: employer_address => count
-    mapping employee_count: address => u64;
-    
-    // Tracks pending terminations: hash(employer, employee) => deadline_block
-    mapping pending_terminations: field => u64;
+    // Employment tracking
+    mapping employments: field => bool;           // hash(employer, employee) => is_active
+    mapping employee_count: address => u64;       // employer => count
+    mapping pending_terminations: field => u64;   // hash(employer, employee) => deadline_block
 
     // Premium tracking
-    // Total premiums deposited per employer (running total)
-    mapping employer_premium_totals: address => u128;
-    
-    // Track which periods have been paid: hash(employer, period) => paid
-    mapping premium_periods: field => bool;
-    
-    // Total pool balance
-    mapping pool_balance: u8 => u128;  // 0u8 => total USDC in pool
+    mapping employer_premium_totals: address => u128;  // employer => running total
+    mapping premium_periods: field => bool;            // hash(employer, period) => paid
+    mapping pool_balance: u8 => u128;                  // 0u8 => total USDC in pool
+
+    // Claim tracking
+    mapping claims: field => bool;                // hash(employer, employee, end_block) => claimed
+    mapping active_claims: address => bool;       // employee => has active claim
 
     // ============================================
-    // TRANSITIONS
+    // TRANSITIONS: EMPLOYER REGISTRATION
     // ============================================
     
     // Register an employer (admin only)
-    // Only the UWV authority can register employers
     async transition register_employer(employer: address) -> Future {
-        // Only admin can register employers
         assert_eq(self.caller, ADMIN);
-        
         return finalize_register_employer(employer);
     }
     
     async function finalize_register_employer(employer: address) {
-        // Check if already registered
         let already_registered: bool = Mapping::get_or_use(employers, employer, false);
-        assert(!already_registered); // Cannot register twice
-        
-        // Register the employer
+        assert(!already_registered);
         Mapping::set(employers, employer, true);
     }
     
+    // ============================================
+    // TRANSITIONS: EMPLOYEE REGISTRATION
+    // ============================================
+    
     // Register an employee (employer only)
-    // Creates two Employment records: one for employer, one for employee
     async transition register_employee(
         employee: address,
         salary: u64,
@@ -151,7 +182,6 @@ program zk_insurancex.aleo {
     ) -> (Employment, Employment, Future) {
         let employer: address = self.caller;
         
-        // Create employment record for employer
         let employer_record: Employment = Employment {
             owner: employer,
             employer: employer,
@@ -163,7 +193,6 @@ program zk_insurancex.aleo {
             termination_type: 0u8,     
         };
         
-        // Create employment record for employee
         let employee_record: Employment = Employment {
             owner: employee,
             employer: employer,
@@ -175,7 +204,6 @@ program zk_insurancex.aleo {
             termination_type: 0u8,    
         };
         
-        // Compute hash using EmploymentKey struct
         let employment_hash: field = BHP256::hash_to_field(EmploymentKey {
             employer: employer,
             employee: employee,
@@ -185,39 +213,31 @@ program zk_insurancex.aleo {
     }
     
     async function finalize_register_employee(employer: address, employment_hash: field) {
-        // Check employer is registered
         let employer_registered: bool = Mapping::get_or_use(employers, employer, false);
         assert(employer_registered);
         
-        // Check employment doesn't already exist (no duplicates)
         let already_exists: bool = Mapping::get_or_use(employments, employment_hash, false);
         assert(!already_exists);
         
-        // Register the employment
         Mapping::set(employments, employment_hash, true);
         
-        // Increment employee count for this employer
         let current_count: u64 = Mapping::get_or_use(employee_count, employer, 0u64);
         Mapping::set(employee_count, employer, current_count + 1u64);
     }
 
     // ============================================
-    // TERMINATION TRANSITIONS
+    // TRANSITIONS: TERMINATION
     // ============================================
     
     // Employer initiates termination
-    // Consumes employer's record, outputs updated record with termination pending
-    // Employee has TERMINATION_RESPONSE_PERIOD blocks to confirm or dispute
     async transition terminate_initiate(
         emp: Employment,
         current_block: u64
     ) -> (Employment, Future) {
-        // Only employer can initiate
         assert_eq(self.caller, emp.employer);
         assert_eq(emp.owner, emp.employer);
         assert(emp.is_active);
         
-        // Create updated employer record
         let updated_record: Employment = Employment {
             owner: emp.employer,
             employer: emp.employer,
@@ -226,10 +246,9 @@ program zk_insurancex.aleo {
             start_block: emp.start_block,
             end_block: current_block,
             is_active: false,
-            termination_type: 2u8,  // employer-initiated
+            termination_type: 2u8,
         };
         
-        // Compute employment hash using EmploymentKey struct
         let employment_hash: field = BHP256::hash_to_field(EmploymentKey {
             employer: emp.employer,
             employee: emp.employee,
@@ -241,31 +260,24 @@ program zk_insurancex.aleo {
     }
     
     async function finalize_terminate_initiate(employment_hash: field, deadline: u64) {
-        // Check employment exists and is active
         let is_active: bool = Mapping::get_or_use(employments, employment_hash, false);
         assert(is_active);
         
-        // Check no pending termination already exists
         let existing_deadline: u64 = Mapping::get_or_use(pending_terminations, employment_hash, 0u64);
         assert_eq(existing_deadline, 0u64);
         
-        // Set pending termination with deadline
         Mapping::set(pending_terminations, employment_hash, deadline);
     }
 
     // Employee confirms termination (mutual agreement)
-    // Consumes employee's record, outputs updated record
-    // Finalizes the termination: sets employment to inactive, decrements count
     async transition terminate_confirm(
         emp: Employment,
         end_block: u64
     ) -> (Employment, Future) {
-        // Only employee can confirm
         assert_eq(self.caller, emp.employee);
         assert_eq(emp.owner, emp.employee);
-        assert(emp.is_active);  // Employee's record still shows active
+        assert(emp.is_active);
         
-        // Create updated employee record
         let updated_record: Employment = Employment {
             owner: emp.employee,
             employer: emp.employer,
@@ -274,10 +286,9 @@ program zk_insurancex.aleo {
             start_block: emp.start_block,
             end_block: end_block,
             is_active: false,
-            termination_type: 1u8,  // mutual agreement
+            termination_type: 1u8,
         };
         
-        // Compute employment hash using EmploymentKey struct
         let employment_hash: field = BHP256::hash_to_field(EmploymentKey {
             employer: emp.employer,
             employee: emp.employee,
@@ -287,33 +298,25 @@ program zk_insurancex.aleo {
     }
     
     async function finalize_terminate_confirm(employment_hash: field, employer: address) {
-        // Check pending termination exists
         let deadline: u64 = Mapping::get_or_use(pending_terminations, employment_hash, 0u64);
-        assert(deadline > 0u64);  // Must have pending termination
+        assert(deadline > 0u64);
         
-        // Set employment to inactive
         Mapping::set(employments, employment_hash, false);
-        
-        // Clear pending termination
         Mapping::set(pending_terminations, employment_hash, 0u64);
         
-        // Decrement employee count
         let current_count: u64 = Mapping::get_or_use(employee_count, employer, 0u64);
         Mapping::set(employee_count, employer, current_count - 1u64);
     }
     
     // Employee disputes termination (escalates to UWV)
-    // Consumes employee's record, outputs updated record with disputed status
     async transition terminate_dispute(
         emp: Employment,
         current_block: u64
     ) -> (Employment, Future) {
-        // Only employee can dispute
         assert_eq(self.caller, emp.employee);
         assert_eq(emp.owner, emp.employee);
-        assert(emp.is_active);  // Employee's record still shows active
+        assert(emp.is_active);
         
-        // Create updated employee record with disputed status
         let updated_record: Employment = Employment {
             owner: emp.employee,
             employer: emp.employer,
@@ -322,10 +325,9 @@ program zk_insurancex.aleo {
             start_block: emp.start_block,
             end_block: current_block,
             is_active: false,
-            termination_type: 3u8,  // disputed, pending UWV
+            termination_type: 3u8,
         };
         
-        // Compute employment hash using EmploymentKey struct
         let employment_hash: field = BHP256::hash_to_field(EmploymentKey {
             employer: emp.employer,
             employee: emp.employee,
@@ -335,23 +337,17 @@ program zk_insurancex.aleo {
     }
     
     async function finalize_terminate_dispute(employment_hash: field) {
-        // Check pending termination exists
         let deadline: u64 = Mapping::get_or_use(pending_terminations, employment_hash, 0u64);
-        assert(deadline > 0u64);  // Must have pending termination
-        
-        // Keep employment active until UWV resolves
-        // Keep pending_terminations entry to indicate dispute in progress
-        // UWV will resolve via terminate_uwv_resolve
+        assert(deadline > 0u64);
+        // Keep pending_terminations entry for UWV to resolve
     }
     
-    // Anyone can finalize termination after deadline passes (no employee response)
-    // This completes the termination if employee didn't confirm or dispute in time
+    // Anyone can finalize termination after deadline (no employee response)
     async transition terminate_finalize(
         employer: address,
         employee: address,
         current_block: u64
     ) -> Future {
-        // Compute employment hash using EmploymentKey struct
         let employment_hash: field = BHP256::hash_to_field(EmploymentKey {
             employer: employer,
             employee: employee,
@@ -361,35 +357,25 @@ program zk_insurancex.aleo {
     }
     
     async function finalize_terminate_finalize(employment_hash: field, employer: address, current_block: u64) {
-        // Check pending termination exists
         let deadline: u64 = Mapping::get_or_use(pending_terminations, employment_hash, 0u64);
-        assert(deadline > 0u64);  // Must have pending termination
-        
-        // Check deadline has passed
+        assert(deadline > 0u64);
         assert(current_block >= deadline);
         
-        // Set employment to inactive
         Mapping::set(employments, employment_hash, false);
-        
-        // Clear pending termination
         Mapping::set(pending_terminations, employment_hash, 0u64);
         
-        // Decrement employee count
         let current_count: u64 = Mapping::get_or_use(employee_count, employer, 0u64);
         Mapping::set(employee_count, employer, current_count - 1u64);
     }
     
     // UWV resolves a disputed termination
-    // Admin only - decides if termination stands or is reversed
     async transition terminate_uwv_resolve(
         employer: address,
         employee: address,
-        approved: bool  // true = termination approved, false = reversed (employee stays)
+        approved: bool
     ) -> Future {
-        // Only admin (UWV) can resolve disputes
         assert_eq(self.caller, ADMIN);
         
-        // Compute employment hash using EmploymentKey struct
         let employment_hash: field = BHP256::hash_to_field(EmploymentKey {
             employer: employer,
             employee: employee,
@@ -399,48 +385,32 @@ program zk_insurancex.aleo {
     }
     
     async function finalize_terminate_uwv_resolve(employment_hash: field, employer: address, approved: bool) {
-        // Check pending termination exists (dispute in progress)
         let deadline: u64 = Mapping::get_or_use(pending_terminations, employment_hash, 0u64);
         assert(deadline > 0u64);
         
-        // Clear pending termination
         Mapping::set(pending_terminations, employment_hash, 0u64);
         
         if approved {
-            // Termination approved - finalize it
             Mapping::set(employments, employment_hash, false);
-            
-            // Decrement employee count
             let current_count: u64 = Mapping::get_or_use(employee_count, employer, 0u64);
             Mapping::set(employee_count, employer, current_count - 1u64);
-        } else {
-            // Termination reversed - employment continues
-            // employments mapping stays true (active)
-            // Employee count unchanged
         }
+        // If not approved, employment stays active
     }    
 
     // ============================================
-    // PREMIUM DEPOSIT TRANSITIONS
+    // TRANSITIONS: PREMIUM DEPOSITS
     // ============================================
 
     // Employer deposits premium for a period
-    // Requires prior approval: mock_usdc.aleo/approve(zk_insurancex.aleo, amount)
-    // Flow:
-    //   1. Employer calculates total premium off-chain (sum of 3% × salary for all employees)
-    //   2. Employer approves zk_insurancex to spend USDC
-    //   3. Employer calls deposit_premium(amount, period)
-    //   4. Contract pulls USDC from employer to pool
     async transition deposit_premium(
-        public amount: u128,      // Total USDC amount (6 decimals)
-        public period: u64        // Period identifier (1, 2, 3...)
+        public amount: u128,
+        public period: u64
     ) -> (PremiumReceipt, Future) {
         let employer: address = self.caller;
         
-        // Amount must be positive
         assert(amount > 0u128);
         
-        // Create receipt for employer
         let receipt: PremiumReceipt = PremiumReceipt {
             owner: employer,
             employer: employer,
@@ -448,13 +418,11 @@ program zk_insurancex.aleo {
             period: period,
         };
         
-        // Compute premium period key
         let period_key: field = BHP256::hash_to_field(PremiumKey {
             employer: employer,
             period: period,
         });
         
-        // Call mock_usdc to transfer from employer to pool
         let transfer_future: Future = mock_usdc.aleo/transfer_from(employer, POOL, amount);
         
         return (receipt, finalize_deposit_premium(employer, amount, period_key, transfer_future));
@@ -466,27 +434,163 @@ program zk_insurancex.aleo {
         period_key: field,
         transfer_future: Future
     ) {
-        // Await the USDC transfer
         transfer_future.await();
         
-        // Check employer is registered
         let employer_registered: bool = Mapping::get_or_use(employers, employer, false);
         assert(employer_registered);
         
-        // Check period not already paid
         let already_paid: bool = Mapping::get_or_use(premium_periods, period_key, false);
         assert(!already_paid);
         
-        // Mark period as paid
         Mapping::set(premium_periods, period_key, true);
         
-        // Update employer's running total
         let current_total: u128 = Mapping::get_or_use(employer_premium_totals, employer, 0u128);
         Mapping::set(employer_premium_totals, employer, current_total + amount);
         
-        // Update pool balance
         let current_pool: u128 = Mapping::get_or_use(pool_balance, 0u8, 0u128);
         Mapping::set(pool_balance, 0u8, current_pool + amount);
+    }
+
+    // ============================================
+    // TRANSITIONS: CLAIMS & BENEFITS
+    // ============================================
+
+    // Employee submits unemployment claim after termination
+    // Eligible termination types: 1 (mutual), 2 (employer-initiated finalized), 4 (UWV-resolved)
+    // NOT eligible: 0 (active), 3 (disputed pending)
+    async transition submit_claim(
+        emp: Employment
+    ) -> (Claim, Future) {
+        // Only the employee can submit their own claim
+        assert_eq(self.caller, emp.employee);
+        assert_eq(emp.owner, emp.employee);
+        
+        // Must be terminated (not active)
+        assert(!emp.is_active);
+        
+        // Must be eligible termination type (1, 2, or 4, NOT 3)
+        // Type 3 (disputed) cannot claim until UWV resolves it to type 4
+        let is_eligible: bool = (emp.termination_type == 1u8) || 
+                                 (emp.termination_type == 2u8) || 
+                                 (emp.termination_type == 4u8);
+        assert(is_eligible);
+        
+        // Calculate work duration
+        let work_duration: u64 = emp.end_block - emp.start_block;
+        
+        // Must have worked minimum duration (26 weeks)
+        assert(work_duration >= MIN_WORK_DURATION);
+        
+        // Calculate benefit months based on Dutch WW rules:
+        // - Minimum 3 months
+        // - +1 month per year worked (after first year)
+        // - Maximum 24 months
+        let years_worked: u64 = work_duration / BLOCKS_PER_YEAR;
+        let benefit_months: u64 = MIN_BENEFIT_MONTHS + years_worked;
+        
+        // Cap at maximum
+        let final_months: u64 = benefit_months < MAX_BENEFIT_MONTHS ? benefit_months : MAX_BENEFIT_MONTHS;
+        
+        // Calculate benefit amount (70% of salary)
+        // salary is u64, convert to u128 for USDC calculations
+        let salary_u128: u128 = emp.salary as u128;
+        let benefit_amount: u128 = (salary_u128 * BENEFIT_PERCENTAGE as u128) / 100u128;
+        
+        // Create claim record
+        let claim: Claim = Claim {
+            owner: emp.employee,
+            employee: emp.employee,
+            employer: emp.employer,
+            benefit_amount: benefit_amount,
+            total_months: final_months,
+            months_claimed: 0u64,
+            last_withdraw_block: emp.end_block,  // Start from termination
+            end_block: emp.end_block,
+        };
+        
+        // Compute claim key for mapping
+        let claim_key: field = BHP256::hash_to_field(ClaimKey {
+            employer: emp.employer,
+            employee: emp.employee,
+            end_block: emp.end_block,
+        });
+        
+        return (claim, finalize_submit_claim(emp.employee, claim_key));
+    }
+    
+    async function finalize_submit_claim(employee: address, claim_key: field) {
+        // Check this specific employment hasn't been claimed already
+        let already_claimed: bool = Mapping::get_or_use(claims, claim_key, false);
+        assert(!already_claimed);
+        
+        // Check employee doesn't have an active claim
+        // (can only have one active claim at a time)
+        let has_active: bool = Mapping::get_or_use(active_claims, employee, false);
+        assert(!has_active);
+        
+        // Mark claim as submitted
+        Mapping::set(claims, claim_key, true);
+        
+        // Mark employee as having active claim
+        Mapping::set(active_claims, employee, true);
+    }
+
+    // Employee withdraws monthly benefit
+    // Can only withdraw once per month, up to total_months
+    async transition withdraw_benefit(
+        claim: Claim,
+        current_block: u64
+    ) -> (Claim, Future) {
+        // Only the claim owner can withdraw
+        assert_eq(self.caller, claim.employee);
+        assert_eq(claim.owner, claim.employee);
+        
+        // Check there are remaining months to claim
+        assert(claim.months_claimed < claim.total_months);
+        
+        // Check enough time has passed since last withdrawal (1 month)
+        let next_withdraw_block: u64 = claim.last_withdraw_block + BLOCKS_PER_MONTH;
+        assert(current_block >= next_withdraw_block);
+        
+        // Create updated claim record
+        let updated_claim: Claim = Claim {
+            owner: claim.employee,
+            employee: claim.employee,
+            employer: claim.employer,
+            benefit_amount: claim.benefit_amount,
+            total_months: claim.total_months,
+            months_claimed: claim.months_claimed + 1u64,
+            last_withdraw_block: current_block,
+            end_block: claim.end_block,
+        };
+        
+        // Check if this is the final withdrawal
+        let is_final: bool = (claim.months_claimed + 1u64) >= claim.total_months;
+        
+        // Transfer benefit from pool to employee
+        let transfer_future: Future = mock_usdc.aleo/transfer_public(claim.employee, claim.benefit_amount);
+        
+        return (updated_claim, finalize_withdraw_benefit(claim.employee, claim.benefit_amount, is_final, transfer_future));
+    }
+    
+    async function finalize_withdraw_benefit(
+        employee: address,
+        amount: u128,
+        is_final: bool,
+        transfer_future: Future
+    ) {
+        // Execute the USDC transfer
+        transfer_future.await();
+        
+        // Decrease pool balance
+        let current_pool: u128 = Mapping::get_or_use(pool_balance, 0u8, 0u128);
+        assert(current_pool >= amount);  // Pool must have enough funds
+        Mapping::set(pool_balance, 0u8, current_pool - amount);
+        
+        // If final withdrawal, clear active claim status
+        if is_final {
+            Mapping::set(active_claims, employee, false);
+        }
     }
 
 }
