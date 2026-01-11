@@ -1,9 +1,18 @@
 // DEVNET alternative 1
 leo build
 leo devnet --snarkos $(which snarkos) --snarkos-features test_network --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11 --clear-storage
-leo deploy --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+// Deploy mock_usdc
+// From mock_usdc folder: leo deploy --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+// Deploy vault
+// From vault folder: leo deploy --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+// Register employer
 leo execute register_employer aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 CHECK: curl http://localhost:3030/testnet/program/zk_insurancex.aleo/mapping/employers/aleo1d9es6d8kuzg65dlfdpx9zxchcsarh8k0hwxfx5eg6k4w7ew6gs8sv5aza0
+
+// Register employee
 leo execute register_employee aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px 5000000000u64 1000u64 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 
 

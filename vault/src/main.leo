@@ -2,6 +2,7 @@
 // Phase 1: Employer Registration
 // Phase 2: Employee Registration
 // Phase 3: Employment Termination
+// Phase 4: Premium Deposits
 
 // TESTNET
 // 1. leo build
@@ -11,11 +12,18 @@
 // DEVNET alternative 1
 // 1. leo build
 // 2. leo devnet --snarkos $(which snarkos) --snarkos-features test_network --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11 --clear-storage
-// 3. leo deploy --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+// 3. Deploy mock_usdc first, then zk_insurancex
 // 4. leo execute register_employer aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 // 5. CHECK: curl http://localhost:3030/testnet/program/zk_insurancex.aleo/mapping/employers/aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px
 // 6. leo execute register_employee aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px 5000000000u64 1000u64 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 // 7. leo execute terminate_initiate <EMP> <BLOCK> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+//
+// PREMIUM DEPOSIT FLOW:
+// 1. Mint USDC: leo execute mock_usdc.aleo/mint_public <employer> 1000000000u128 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+// 2. Approve: leo execute mock_usdc.aleo/approve zk_insurancex.aleo <program address> 500000000u128 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+// 3. Deposit: leo execute deposit_premium 540000000u128 1u64 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+import mock_usdc.aleo;
 
 program zk_insurancex.aleo {
 
@@ -26,6 +34,10 @@ program zk_insurancex.aleo {
     // The admin address (UWV authority)
     // const ADMIN: address = aleo1d9es6d8kuzg65dlfdpx9zxchcsarh8k0hwxfx5eg6k4w7ew6gs8sv5aza0; // Testnet
     const ADMIN: address = aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px; // Devnet
+
+    // Pool address - where premiums are collected
+    // In production, this could be a multi-sig or the program itself
+    const POOL: address = aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px; // Same as admin for testing
 
     // Termination response period in blocks (~10 blocks for testing)
     const TERMINATION_RESPONSE_PERIOD: u64 = 10u64;
@@ -50,6 +62,12 @@ program zk_insurancex.aleo {
         employee: address,
     }
 
+    // Struct for hashing employer-period pairs (premium tracking)
+    struct PremiumKey {
+        employer: address,
+        period: u64,
+    }
+
     // ============================================
     // RECORDS
     // ============================================
@@ -64,6 +82,14 @@ program zk_insurancex.aleo {
         end_block: u64,           // 0 if active, block height if terminated
         is_active: bool,          // Currently employed?
         termination_type: u8,     // 0 = active, 1 = mutual, 2 = employer-initiated, 3 = UWV-resolved
+    }
+
+    // Premium receipt - proof of payment for employer
+    record PremiumReceipt {
+        owner: address,           // Employer
+        employer: address,        // Same as owner
+        amount: u128,             // USDC amount deposited
+        period: u64,              // Period identifier (1, 2, 3...)
     }
 
     // ============================================
@@ -83,6 +109,16 @@ program zk_insurancex.aleo {
     
     // Tracks pending terminations: hash(employer, employee) => deadline_block
     mapping pending_terminations: field => u64;
+
+    // Premium tracking
+    // Total premiums deposited per employer (running total)
+    mapping employer_premium_totals: address => u128;
+    
+    // Track which periods have been paid: hash(employer, period) => paid
+    mapping premium_periods: field => bool;
+    
+    // Total pool balance
+    mapping pool_balance: u8 => u128;  // 0u8 => total USDC in pool
 
     // ============================================
     // TRANSITIONS
@@ -383,5 +419,74 @@ program zk_insurancex.aleo {
             // Employee count unchanged
         }
     }    
+
+    // ============================================
+    // PREMIUM DEPOSIT TRANSITIONS
+    // ============================================
+
+    // Employer deposits premium for a period
+    // Requires prior approval: mock_usdc.aleo/approve(zk_insurancex.aleo, amount)
+    // Flow:
+    //   1. Employer calculates total premium off-chain (sum of 3% × salary for all employees)
+    //   2. Employer approves zk_insurancex to spend USDC
+    //   3. Employer calls deposit_premium(amount, period)
+    //   4. Contract pulls USDC from employer to pool
+    async transition deposit_premium(
+        public amount: u128,      // Total USDC amount (6 decimals)
+        public period: u64        // Period identifier (1, 2, 3...)
+    ) -> (PremiumReceipt, Future) {
+        let employer: address = self.caller;
+        
+        // Amount must be positive
+        assert(amount > 0u128);
+        
+        // Create receipt for employer
+        let receipt: PremiumReceipt = PremiumReceipt {
+            owner: employer,
+            employer: employer,
+            amount: amount,
+            period: period,
+        };
+        
+        // Compute premium period key
+        let period_key: field = BHP256::hash_to_field(PremiumKey {
+            employer: employer,
+            period: period,
+        });
+        
+        // Call mock_usdc to transfer from employer to pool
+        let transfer_future: Future = mock_usdc.aleo/transfer_from(employer, POOL, amount);
+        
+        return (receipt, finalize_deposit_premium(employer, amount, period_key, transfer_future));
+    }
+    
+    async function finalize_deposit_premium(
+        employer: address, 
+        amount: u128, 
+        period_key: field,
+        transfer_future: Future
+    ) {
+        // Await the USDC transfer
+        transfer_future.await();
+        
+        // Check employer is registered
+        let employer_registered: bool = Mapping::get_or_use(employers, employer, false);
+        assert(employer_registered);
+        
+        // Check period not already paid
+        let already_paid: bool = Mapping::get_or_use(premium_periods, period_key, false);
+        assert(!already_paid);
+        
+        // Mark period as paid
+        Mapping::set(premium_periods, period_key, true);
+        
+        // Update employer's running total
+        let current_total: u128 = Mapping::get_or_use(employer_premium_totals, employer, 0u128);
+        Mapping::set(employer_premium_totals, employer, current_total + amount);
+        
+        // Update pool balance
+        let current_pool: u128 = Mapping::get_or_use(pool_balance, 0u8, 0u128);
+        Mapping::set(pool_balance, 0u8, current_pool + amount);
+    }
 
 }

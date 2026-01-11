@@ -18,14 +18,14 @@
 
 // Check: curl "http://localhost:3030/testnet/program/mock_usdc.aleo/mapping/balances/aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px"
 
-program mock_usdc.aleo {
+program mock_usdc.aleo {  
 
     // ──────────────────────────────────────────────
     //  Constants
     // ──────────────────────────────────────────────
 
-    const ADMIN: address = aleo1d9es6d8kuzg65dlfdpx9zxchcsarh8k0hwxfx5eg6k4w7ew6gs8sv5aza0;
-    // const ADMIN: address = aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px;
+    // const ADMIN: address = aleo1d9es6d8kuzg65dlfdpx9zxchcsarh8k0hwxfx5eg6k4w7ew6gs8sv5aza0;
+    const ADMIN: address = aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px;
     const DECIMALS: u8 = 6u8;
 
     // ──────────────────────────────────────────────

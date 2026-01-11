@@ -29,46 +29,92 @@ ZK_InsuranceX brings unemployment benefits on-chain with privacy-preserving desi
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           PUBLIC STATE (Mappings)                        │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐  │
-│  │   employers     │  │ employee_count  │  │     employments         │  │
-│  │ addr => bool    │  │ addr => u64     │  │ hash(emp,ee) => bool    │  │
-│  └─────────────────┘  └─────────────────┘  └─────────────────────────┘  │
-│                                                                          │
-│  ┌─────────────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
-│  │  pending_terminations   │  │ employer_totals │  │   pool_total    │  │
-│  │  hash(emp,ee) => u64    │  │ addr => u64     │  │     u64         │  │
-│  │  (deadline block)       │  │ (future)        │  │ (future)        │  │
-│  └─────────────────────────┘  └─────────────────┘  └─────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           PUBLIC STATE (Mappings)                            │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
+│  │   employers     │  │ employee_count  │  │       employments           │  │
+│  │ addr => bool    │  │ addr => u64     │  │ hash(employer,ee) => bool   │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────────────────────┘  │
+│                                                                              │
+│  ┌─────────────────────────┐  ┌─────────────────────────┐                   │
+│  │  pending_terminations   │  │    premium_periods      │                   │
+│  │  hash(emp,ee) => u64    │  │ hash(emp,period) => bool│                   │
+│  │  (deadline block)       │  │ (paid yes/no)           │                   │
+│  └─────────────────────────┘  └─────────────────────────┘                   │
+│                                                                              │
+│  ┌─────────────────────────┐  ┌─────────────────────────┐                   │
+│  │ employer_premium_totals │  │      pool_balance       │                   │
+│  │     addr => u128        │  │      0u8 => u128        │                   │
+│  │  (running total)        │  │   (total USDC in pool)  │                   │
+│  └─────────────────────────┘  └─────────────────────────┘                   │
+└─────────────────────────────────────────────────────────────────────────────┘
 
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         PRIVATE STATE (Records)                          │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                      Employment Record                           │    │
-│  │  owner: address           // employer OR employee holds copy     │    │
-│  │  employer: address                                               │    │
-│  │  employee: address                                               │    │
-│  │  salary: u64              // monthly salary in USDC micro-units  │    │
-│  │  start_block: u64                                                │    │
-│  │  end_block: u64           // 0 if active                         │    │
-│  │  is_active: bool                                                 │    │
-│  │  termination_type: u8     // 0=active, 1=mutual, 2=fired, 3=disputed, 4=UWV │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    PremiumReceipt Record (future)                │    │
-│  │  owner: address           // employer holds                      │    │
-│  │  employer: address                                               │    │
-│  │  total_amount: u64                                               │    │
-│  │  employee_count: u64                                             │    │
-│  │  block_height: u64                                               │    │
-│  │  merkle_root: field       // commitment to individual breakdown  │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         PRIVATE STATE (Records)                              │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                      Employment Record                               │    │
+│  │  owner: address           // employer OR employee holds copy         │    │
+│  │  employer: address                                                   │    │
+│  │  employee: address                                                   │    │
+│  │  salary: u64              // monthly salary in USDC micro-units      │    │
+│  │  start_block: u64                                                    │    │
+│  │  end_block: u64           // 0 if active                             │    │
+│  │  is_active: bool                                                     │    │
+│  │  termination_type: u8     // 0=active, 1=mutual, 2=fired, 3=disputed │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                      PremiumReceipt Record                           │    │
+│  │  owner: address           // employer holds                          │    │
+│  │  employer: address                                                   │    │
+│  │  amount: u128             // USDC deposited (6 decimals)             │    │
+│  │  period: u64              // period identifier (1, 2, 3...)          │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+## Premium Deposit Flow
+
+Employers deposit premiums monthly for all their employees:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    EMPLOYER'S HR SYSTEM (Off-chain)             │
+│                                                                 │
+│  Employee 1: Salary €3,000 → Premium €90 (3%)                   │
+│  Employee 2: Salary €4,000 → Premium €120 (3%)                  │
+│  Employee 3: Salary €5,000 → Premium €150 (3%)                  │
+│  Employee 4: Salary €6,000 → Premium €180 (3%)                  │
+│  ─────────────────────────────────────────────                  │
+│  Total: €540                                                    │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         ON-CHAIN                                │
+│                                                                 │
+│  1. Employer approves zk_insurancex to spend USDC               │
+│     mock_usdc.aleo/approve(<program_address>, 540000000u128)    │
+│                                                                 │
+│  2. Employer deposits premium                                   │
+│     deposit_premium(540000000u128, 1u64)                        │
+│     - Pulls USDC from employer via transfer_from                │
+│     - Updates employer_premium_totals                           │
+│     - Updates pool_balance                                      │
+│     - Marks period as paid                                      │
+│     - Returns PremiumReceipt to employer                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Multiple employers, multiple periods:**
+
+| Employer | Period | Amount | Pool After |
+|----------|--------|--------|------------|
+| Employer A | 1 | 540 USDC | 540 USDC |
+| Employer B | 1 | 1,200 USDC | 1,740 USDC |
+| Employer A | 2 | 540 USDC | 2,280 USDC |
+| Employer C | 1 | 300 USDC | 2,580 USDC |
 
 ## Termination Flow
 
@@ -128,16 +174,6 @@ ZK_InsuranceX brings unemployment benefits on-chain with privacy-preserving desi
 | 3 | Disputed | Employee disputed, pending UWV review |
 | 4 | UWV-resolved | UWV made final decision |
 
-## Premium Payments (Batch Model)
-
-To scale for large employers (10,000+ employees), premiums use a batch receipt model:
-
-- **On-chain:** One `PremiumReceipt` per employer per month with merkle root
-- **Off-chain:** Employer stores individual employee breakdown
-- **Audit:** Merkle proofs verify individual payments when needed
-
-This keeps individual premium data private while maintaining auditability.
-
 ## Benefit Calculation
 
 Following Dutch WW system:
@@ -146,18 +182,23 @@ Following Dutch WW system:
 
 ## Development Status
 
-- [x] Employer registration (admin-controlled)
-- [x] Employee registration (private records, dual copies)
-- [x] Employment termination
+- [x] Phase 1: Employer registration (admin-controlled)
+- [x] Phase 2: Employee registration (private records, dual copies)
+- [x] Phase 3: Employment termination
   - [x] `terminate_initiate` - Employer initiates
   - [x] `terminate_confirm` - Employee confirms (mutual)
   - [x] `terminate_dispute` - Employee disputes to UWV
   - [x] `terminate_finalize` - Auto-finalize after deadline
   - [x] `terminate_uwv_resolve` - UWV resolves dispute
-- [ ] Premium deposits (batch receipts, USDC integration)
-- [ ] Claim submission
-- [ ] Claim approval
-- [ ] Benefit withdrawals
+- [x] Phase 4: Premium deposits
+  - [x] `deposit_premium` - Employer deposits monthly premium
+  - [x] USDC integration via `transfer_from`
+  - [x] Pool balance tracking
+  - [x] Period tracking (prevent double payment)
+- [ ] Phase 5: Claims & Benefits
+  - [ ] `submit_claim` - Employee submits unemployment claim
+  - [ ] `approve_claim` - Validate eligibility
+  - [ ] `withdraw_benefit` - Employee withdraws from pool
 
 ## Getting Started
 
@@ -165,6 +206,7 @@ Following Dutch WW system:
 
 - [Leo](https://developer.aleo.org/leo/) 
 - [snarkOS](https://github.com/AleoHQ/snarkOS) (for local devnet)
+- Mock USDC token deployed
 
 ### Build
 
@@ -172,53 +214,92 @@ Following Dutch WW system:
 leo build
 ```
 
-### Test locally
+### Local Devnet Setup
+
+```bash
+# 1. Start devnet
+leo devnet --snarkos $(which snarkos) --snarkos-features test_network --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11 --clear-storage
+
+# 2. Deploy mock_usdc (in separate terminal)
+cd mock_usdc
+leo deploy --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+# 3. Deploy zk_insurancex
+cd ../vault
+leo deploy --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+```
+
+### Test Flow
 
 ```bash
 # Register employer (admin only)
-leo run register_employer <employer_address>
+leo execute register_employer <employer_address> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 
 # Register employee (employer only)
-leo run register_employee <employee_address> <salary_u64> <start_block_u64>
+leo execute register_employee <employee_address> <salary_u64> <start_block_u64> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+# Deposit premium
+# Step 1: Mint USDC to employer
+leo execute mock_usdc.aleo/mint_public <employer_address> 1000000000u128 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+# Step 2: Approve zk_insurancex program address to spend USDC
+leo execute mock_usdc.aleo/approve <zk_insurancex_program_address> 540000000u128 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+
+# Step 3: Deposit premium (540 USDC for period 1)
+leo execute deposit_premium 540000000u128 1u64 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 
 # Terminate employment (employer initiates)
-leo run terminate_initiate <employment_record> <current_block_u64>
+leo execute terminate_initiate <employment_record> <current_block_u64> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 
 # Employee confirms termination
-leo run terminate_confirm <employment_record> <end_block_u64>
+leo execute terminate_confirm <employment_record> <end_block_u64> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 
 # Employee disputes termination
-leo run terminate_dispute <employment_record> <current_block_u64>
+leo execute terminate_dispute <employment_record> <current_block_u64> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 
 # Finalize after deadline (anyone can call)
-leo run terminate_finalize <employer_address> <employee_address> <current_block_u64>
+leo execute terminate_finalize <employer_address> <employee_address> <current_block_u64> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 
 # UWV resolves dispute (admin only)
-leo run terminate_uwv_resolve <employer_address> <employee_address> <approved_bool>
+leo execute terminate_uwv_resolve <employer_address> <employee_address> <approved_bool> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
 ```
 
-### Deploy to devnet
+### Check State
 
 ```bash
-leo deploy --network testnet --broadcast
-```
+# Check employer registration
+curl http://localhost:3030/testnet/program/zk_insurancex.aleo/mapping/employers/<employer_address>
 
-### Execute on devnet
+# Check pool balance
+curl http://localhost:3030/testnet/program/zk_insurancex.aleo/mapping/pool_balance/0u8
 
-```bash
-leo execute register_employer <employer_address> --network testnet --broadcast
+# Check employer premium total
+curl http://localhost:3030/testnet/program/zk_insurancex.aleo/mapping/employer_premium_totals/<employer_address>
 ```
 
 ## Constants
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `TERMINATION_RESPONSE_PERIOD` | 86400 | ~1 day in blocks (testing) |
+| `ADMIN` | configurable | UWV authority address |
+| `POOL` | configurable | Pool address for premiums |
+| `TERMINATION_RESPONSE_PERIOD` | 10 | ~10 blocks (testing) |
 | `TERMINATION_RESPONSE_PERIOD` | 2592000 | ~30 days in blocks (production) |
 
 ## Token
 
-Uses mock USDC token for premium payments and benefit withdrawals (deployed separately).
+Uses mock USDC token (6 decimals) for premium payments and benefit withdrawals.
+
+- `mock_usdc.aleo/mint_public` - Mint tokens (admin only)
+- `mock_usdc.aleo/approve` - Approve spender
+- `mock_usdc.aleo/transfer_from` - Transfer on behalf (used by zk_insurancex)
+
+## Future Enhancements
+
+- [ ] Merkle tree for individual premium auditability
+- [ ] Dual-signature model for undisputable records
+- [ ] Cross-border portability
+- [ ] Multiple benefit tiers
 
 ## License
 
