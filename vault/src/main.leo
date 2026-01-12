@@ -13,26 +13,11 @@
 // DEVNET alternative 1
 // 1. leo build
 // 2. leo devnet --snarkos $(which snarkos) --snarkos-features test_network --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11 --clear-storage
-// 3. Deploy mock_usdc first, then zk_insurancex
-// 4. leo execute register_employer aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
-// 5. CHECK: curl http://localhost:3030/testnet/program/zk_insurancex.aleo/mapping/employers/aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px
-// 6. leo execute register_employee aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px 5000000000u64 1000u64 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
-// 7. leo execute terminate_initiate <EMP> <BLOCK> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
-//
-// PREMIUM DEPOSIT FLOW:
-// 1. Mint USDC: leo execute mock_usdc.aleo/mint_public <employer> 1000000000u128 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
-// 2. Approve: leo execute mock_usdc.aleo/approve <program_address> 500000000u128 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
-// 3. Deposit: leo execute deposit_premium 540000000u128 1u64 --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
-//
-// CLAIM & BENEFIT FLOW:
-// 1. After termination (type 1, 2, or 4), employee submits claim:
-//    leo execute submit_claim <terminated_employment_record> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
-// 2. Employee withdraws monthly benefit:
-//    leo execute withdraw_benefit <claim_record> <current_block> --network testnet --broadcast --consensus-heights 0,1,2,3,4,5,6,7,8,9,10,11
+// Check 
 
 import mock_usdc.aleo;
 
-program zk_insurancex.aleo {
+program zk_insurancex_v1.aleo {
 
     // The constructor is configured to prevent upgrades.
     @noupgrade
@@ -56,11 +41,12 @@ program zk_insurancex.aleo {
     
     // Benefit calculation constants
     // For testing, use smaller values. For production, use real block times.
-    const BLOCKS_PER_MONTH: u64 = 100u64;                     // Testing: 100 blocks = 1 month
+    const BLOCKS_PER_MONTH: u64 = 10u64;                     // Testing: 10 blocks 
     // const BLOCKS_PER_MONTH: u64 = 2592000u64;              // Production: ~30 days
     const BLOCKS_PER_YEAR: u64 = 1200u64;                     // Testing: 1200 blocks = 1 year
     // const BLOCKS_PER_YEAR: u64 = 31536000u64;              // Production: ~365 days
-    const MIN_WORK_DURATION: u64 = 600u64;                    // Testing: 600 blocks = 26 weeks
+    const MIN_WORK_DURATION: u64 = 10u64;                     // Testing: 10 blocks for easy testing
+    // const MIN_WORK_DURATION: u64 = 600u64;                  // Testing: 600 blocks = 26 weeks
     // const MIN_WORK_DURATION: u64 = 15724800u64;            // Production: 26 weeks
     
     const MIN_BENEFIT_MONTHS: u64 = 3u64;                     // Minimum 3 months benefit
@@ -567,8 +553,9 @@ program zk_insurancex.aleo {
         // Check if this is the final withdrawal
         let is_final: bool = (claim.months_claimed + 1u64) >= claim.total_months;
         
-        // Transfer benefit from pool to employee
-        let transfer_future: Future = mock_usdc.aleo/transfer_public(claim.employee, claim.benefit_amount);
+        // Transfer benefit from POOL to employee
+        // Note: POOL must have approved this program to spend USDC
+        let transfer_future: Future = mock_usdc.aleo/transfer_from(POOL, claim.employee, claim.benefit_amount);
         
         return (updated_claim, finalize_withdraw_benefit(claim.employee, claim.benefit_amount, is_final, transfer_future));
     }
